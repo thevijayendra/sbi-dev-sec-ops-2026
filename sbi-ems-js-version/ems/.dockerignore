@@ -1,0 +1,14 @@
+.env
+.env.*
+.git
+.gitignore
+node_modules
+coverage
+*.test.js
+*.spec.js
+README.md
+Dockerfile*
+docker-compose*
+terraform/
+.secrets.baseline
+sonar-project.properties

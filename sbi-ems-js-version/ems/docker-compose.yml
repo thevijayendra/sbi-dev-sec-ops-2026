@@ -1,0 +1,55 @@
+version: '3.9'
+
+services:
+  db:
+    image: mysql:8.0
+    container_name: ems-db
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-rootpassword}
+      MYSQL_DATABASE: ${DB_NAME:-ems}
+      MYSQL_USER: ${DB_USER:-ems_user}
+      MYSQL_PASSWORD: ${DB_PASSWORD:-changeme}
+    ports:
+      - "3306:3306"
+    volumes:
+      - ems_db_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  ems:
+    build:
+      context: .
+      dockerfile: Dockerfile.secure
+    container_name: ems-api
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    env_file: .env
+    environment:
+      - DB_HOST=db
+    depends_on:
+      db:
+        condition: service_healthy
+    # Runtime security constraints (DevSecOps training — Module 6)
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    mem_limit: 512m
+    cpus: "1.0"
+    user: "1000:1000"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  ems_db_data:

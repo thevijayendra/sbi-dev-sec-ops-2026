@@ -1,0 +1,24 @@
+# ⚠️  INSECURE DOCKERFILE — FOR TRAINING PURPOSES ONLY
+# Used in Lab 3 to demonstrate container security anti-patterns.
+# DO NOT use this in any real environment.
+#
+# Security problems in this file (find them all!):
+# 1. Running as root (uid 0)
+# 2. Full node:20 image — 1 GB+ with build tools and compilers
+# 3. devDependencies installed — test tools included in production image
+# 4. No .dockerignore — copies node_modules, .git, .env
+# 5. No health check defined
+# 6. npm install instead of npm ci — non-reproducible builds
+# 7. COPY . . may include .env if .dockerignore is absent
+
+FROM node:20
+
+WORKDIR /app
+
+COPY . .
+
+RUN npm install
+
+EXPOSE 3000
+
+CMD ["node", "src/app.js"]

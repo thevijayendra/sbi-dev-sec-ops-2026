@@ -1,0 +1,200 @@
+name: EMS DevSecOps Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+env:
+  IMAGE_NAME: sbi-ems
+  IMAGE_TAG: ${{ github.sha }}
+
+jobs:
+  # ── STAGE 1: SAST — Code Analysis ────────────────────────────────────────
+  sast:
+    name: SAST — Code Analysis
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0        # full history required for SonarQube blame data
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci             # reproducible install — always use ci, not install
+
+      - name: Detect secrets (pre-commit gate)
+        run: |
+          pip install detect-secrets
+          detect-secrets scan --all-files . \
+            --exclude-files "package-lock.json" \
+            --exclude-files ".secrets.baseline" \
+            > /tmp/secrets-scan.json
+          # Fail if any unverified secrets found
+          python3 -c "
+          import json, sys
+          data = json.load(open('/tmp/secrets-scan.json'))
+          results = data.get('results', {})
+          if results:
+              print('SECRETS FOUND:')
+              for f, findings in results.items():
+                  for s in findings:
+                      print(f'  {f}:{s[\"line_number\"]} — {s[\"type\"]}')
+              sys.exit(1)
+          print('No secrets detected.')
+          "
+
+      - name: Semgrep — OWASP Top 10 + Node.js rules
+        run: |
+          pip install semgrep
+          semgrep \
+            --config=p/owasp-top-ten \
+            --config=p/javascript \
+            --config=p/nodejs \
+            --error \
+            --json \
+            --output=semgrep-results.json \
+            ./src || true
+          semgrep \
+            --config=p/owasp-top-ten \
+            --config=p/javascript \
+            --config=p/nodejs \
+            --error \
+            ./src
+
+      - name: Run tests with coverage
+        run: npm test -- --coverage
+        env:
+          JWT_SECRET: test-secret-for-ci-only
+          NODE_ENV: test
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage/
+
+      - name: SonarQube — Quality Gate
+        uses: SonarSource/sonarqube-scan-action@master
+        env:
+          SONAR_TOKEN:    ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+        with:
+          args: >
+            -Dsonar.qualitygate.wait=true
+            -Dsonar.qualitygate.timeout=300
+
+  # ── STAGE 2: IaC Scan ────────────────────────────────────────────────────
+  iac-scan:
+    name: IaC — Checkov Policy Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkov IaC scan
+        run: |
+          pip install checkov
+          checkov \
+            -d terraform/ems \
+            --external-checks-dir custom_policies \
+            --output cli \
+            --output junitxml \
+            --output-file-path . \
+            --soft-fail-on CKV_AWS_144   # example: suppress non-critical check with justification
+
+      - name: Upload Checkov report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: checkov-report
+          path: results_junitxml.xml
+
+  # ── STAGE 3: Build + Container Scan ──────────────────────────────────────
+  build-and-scan:
+    name: Build + Container Security Scan
+    runs-on: ubuntu-latest
+    needs: [sast, iac-scan]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image (hardened Dockerfile)
+        run: docker build -f Dockerfile.secure -t $IMAGE_NAME:$IMAGE_TAG .
+
+      - name: Trivy — container vulnerability scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: "${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}"
+          format: sarif
+          output: trivy-results.sarif
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+
+      - name: Upload Trivy SARIF to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-results.sarif
+
+      - name: Push image to registry (main branch only)
+        if: github.ref == 'refs/heads/main'
+        run: |
+          echo "${{ secrets.REGISTRY_PASSWORD }}" | \
+            docker login registry.sbi.internal -u "${{ secrets.REGISTRY_USER }}" --password-stdin
+          docker tag $IMAGE_NAME:$IMAGE_TAG \
+            registry.sbi.internal/$IMAGE_NAME:$IMAGE_TAG
+          docker tag $IMAGE_NAME:$IMAGE_TAG \
+            registry.sbi.internal/$IMAGE_NAME:latest
+          docker push registry.sbi.internal/$IMAGE_NAME:$IMAGE_TAG
+          docker push registry.sbi.internal/$IMAGE_NAME:latest
+
+  # ── STAGE 4: DAST — Dynamic Scan ─────────────────────────────────────────
+  dast:
+    name: DAST — ZAP API Scan
+    runs-on: ubuntu-latest
+    needs: build-and-scan
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start EMS for DAST testing
+        run: |
+          docker run -d --name ems-dast \
+            -p 3000:3000 \
+            -e JWT_SECRET="${{ secrets.JWT_SECRET }}" \
+            -e DB_HOST="none" \
+            -e DB_PASSWORD="none" \
+            -e NODE_ENV="test" \
+            $IMAGE_NAME:$IMAGE_TAG || true
+
+          # Wait for Express startup (Node.js starts much faster than Spring Boot)
+          sleep 15
+
+          # Confirm health endpoint responds
+          curl --retry 5 --retry-delay 3 -f http://localhost:3000/health
+
+      - name: OWASP ZAP — OpenAPI active scan
+        run: |
+          docker run --network=host \
+            -v "$(pwd)":/zap/wrk/:rw \
+            ghcr.io/zaproxy/zaproxy:stable \
+            zap-api-scan.py \
+              -t http://localhost:3000/api-docs.json \
+              -f openapi \
+              -r zap-report.html \
+              -x zap-report.xml \
+              -l WARN \
+              -z "-config scanner.attackStrength=LOW"
+
+      - name: Upload ZAP HTML report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: zap-dast-report
+          path: zap-report.html

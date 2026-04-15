@@ -1,0 +1,136 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  EMS Infrastructure — SECURE Reference Configuration
+#  This is the AFTER state for Lab 4.
+#  All Checkov findings from main.tf have been remediated here.
+# ─────────────────────────────────────────────────────────────────────────────
+
+terraform {
+  required_version = ">= 1.7.0"
+  required_providers {
+    aws = { source = "hashicorp/aws", version = "~> 5.0" }
+  }
+
+  # FIX: Encrypted remote state backend
+  backend "s3" {
+    bucket         = "sbi-ems-tfstate"
+    key            = "ems/terraform.tfstate"
+    region         = "ap-south-1"
+    encrypt        = true
+    dynamodb_table = "sbi-ems-tflock"
+  }
+}
+
+provider "aws" { region = "ap-south-1" }
+
+variable "db_password" { type = string; sensitive = true }
+variable "environment" { default = "staging" }
+variable "app_name"    { default = "sbi-ems" }
+
+resource "aws_vpc" "ems_vpc" {
+  cidr_block           = "10.0.0.0/16"
+  enable_dns_hostnames = true
+  enable_dns_support   = true
+  tags = { Name = "${var.app_name}-vpc", Environment = var.environment }
+}
+
+resource "aws_subnet" "public_a"  { vpc_id = aws_vpc.ems_vpc.id; cidr_block = "10.0.1.0/24";  availability_zone = "ap-south-1a" }
+resource "aws_subnet" "private_a" { vpc_id = aws_vpc.ems_vpc.id; cidr_block = "10.0.10.0/24"; availability_zone = "ap-south-1a" }
+resource "aws_subnet" "private_b" { vpc_id = aws_vpc.ems_vpc.id; cidr_block = "10.0.11.0/24"; availability_zone = "ap-south-1b" }
+
+resource "aws_db_subnet_group" "ems_db_subnets" {
+  name       = "${var.app_name}-db-subnets"
+  subnet_ids = [aws_subnet.private_a.id, aws_subnet.private_b.id]
+}
+
+# FIX 1: Restrictive security group — only ALB on 443 and load-balancer on 3000
+resource "aws_security_group" "ems_alb_sg" {
+  name   = "${var.app_name}-alb-sg"
+  vpc_id = aws_vpc.ems_vpc.id
+  ingress {
+    description = "HTTPS from internet"
+    from_port   = 443; to_port = 443; protocol = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  egress { from_port = 0; to_port = 0; protocol = "-1"; cidr_blocks = ["0.0.0.0/0"] }
+}
+
+resource "aws_security_group" "ems_app_sg" {
+  name   = "${var.app_name}-app-sg"
+  vpc_id = aws_vpc.ems_vpc.id
+  ingress {
+    description     = "Node.js app port from ALB only"
+    from_port       = 3000; to_port = 3000; protocol = "tcp"
+    security_groups = [aws_security_group.ems_alb_sg.id]
+  }
+  egress { from_port = 0; to_port = 0; protocol = "-1"; cidr_blocks = ["0.0.0.0/0"] }
+}
+
+resource "aws_security_group" "ems_rds_sg" {
+  name   = "${var.app_name}-rds-sg"
+  vpc_id = aws_vpc.ems_vpc.id
+  ingress {
+    description     = "MySQL from app only"
+    from_port       = 3306; to_port = 3306; protocol = "tcp"
+    security_groups = [aws_security_group.ems_app_sg.id]
+  }
+  egress { from_port = 0; to_port = 0; protocol = "-1"; cidr_blocks = ["0.0.0.0/0"] }
+}
+
+# FIX 2–5: Secure RDS instance
+resource "aws_db_instance" "ems_mysql" {
+  identifier        = "${var.app_name}-db"
+  engine            = "mysql"
+  engine_version    = "8.0"
+  instance_class    = "db.t3.medium"
+  allocated_storage = 20
+
+  db_name  = "ems"
+  username = "admin"
+  password = var.db_password
+
+  db_subnet_group_name   = aws_db_subnet_group.ems_db_subnets.name
+  vpc_security_group_ids = [aws_security_group.ems_rds_sg.id]
+
+  publicly_accessible = false   # FIX 2: not internet-accessible
+  storage_encrypted   = true    # FIX 3: encryption at rest
+  deletion_protection = true    # FIX 4: prevent accidental deletion
+  skip_final_snapshot = false   # take snapshot on deletion
+  multi_az            = true    # FIX 5: RBI BCM requirement (CKV_SBI_001)
+
+  backup_retention_period = 7
+  backup_window           = "02:00-03:00"
+  maintenance_window      = "sun:04:00-sun:05:00"
+
+  tags = { Name = "${var.app_name}-db", Environment = var.environment, Project = "ems" }
+}
+
+# FIX 6–8: S3 bucket — private, encrypted, no public access
+resource "aws_s3_bucket" "ems_reports" {
+  bucket = "sbi-${var.app_name}-reports-${var.environment}"
+  tags   = { Name = "${var.app_name}-reports", Environment = var.environment }
+}
+
+resource "aws_s3_bucket_public_access_block" "ems_reports" {
+  bucket                  = aws_s3_bucket.ems_reports.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "ems_reports" {
+  bucket = aws_s3_bucket.ems_reports.id
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "aws:kms"
+    }
+  }
+}
+
+resource "aws_s3_bucket_versioning" "ems_reports" {
+  bucket = aws_s3_bucket.ems_reports.id
+  versioning_configuration { status = "Enabled" }
+}
+
+output "rds_endpoint"   { value = aws_db_instance.ems_mysql.endpoint; sensitive = true }
+output "s3_bucket_name" { value = aws_s3_bucket.ems_reports.bucket }

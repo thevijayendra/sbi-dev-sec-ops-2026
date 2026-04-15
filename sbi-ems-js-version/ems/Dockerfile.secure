@@ -1,0 +1,40 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  EMS — Hardened Production Dockerfile
+#  Security controls applied:
+#   ✓ node:20-alpine base — minimal OS attack surface
+#   ✓ --omit=dev — no test/lint tools in runtime image
+#   ✓ Non-root user (emsuser, uid 1000)
+#   ✓ npm ci — reproducible, locked dependency install
+#   ✓ npm cache clean — no installer artifacts left in layer
+#   ✓ HEALTHCHECK defined
+#   ✓ .dockerignore excludes .env, .git, node_modules, coverage
+# ─────────────────────────────────────────────────────────────────────────────
+
+FROM node:20-alpine
+
+# Create non-root user — NEVER run as root
+RUN addgroup -S emsgroup && adduser -S emsuser -G emsgroup
+
+WORKDIR /app
+
+# Copy package files first — separate layer, cached between builds
+COPY package*.json ./
+
+# Install production dependencies only; clean cache to keep layer small
+RUN npm ci --omit=dev && npm cache clean --force
+
+# Copy application source — owned by non-root user
+COPY --chown=emsuser:emsgroup src/ ./src/
+
+# Switch to non-root user before runtime
+USER emsuser
+
+# Expose application port
+EXPOSE 3000
+
+# Health check — Kubernetes and Docker Compose use this for readiness
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+  CMD wget -qO- http://localhost:3000/health || exit 1
+
+# Run with node directly — avoids npm as PID 1 (no signal forwarding issues)
+CMD ["node", "src/app.js"]
