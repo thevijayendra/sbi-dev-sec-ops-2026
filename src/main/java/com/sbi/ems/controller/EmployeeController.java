@@ -52,6 +52,7 @@ import java.util.List;
 @RequestMapping("/api/v1/employees")
 @Tag(name = "Employees", description = "Employee management endpoints")
 @SecurityRequirement(name = "bearerAuth")
+@CrossOrigin(origins = "*")
 public class EmployeeController {
 
     private final EmployeeService employeeService;

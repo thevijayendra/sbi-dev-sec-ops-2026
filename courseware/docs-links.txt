@@ -11,6 +11,22 @@ Open:
 http://localhost:9000
 Login: admin/admin
 Generate token
+new project -> select GitHub actions generate a token 
+
+sqp_415f3e63fe4a2265504ed7c84b27a4b1a54501c6
+
+Add Secrets in GitHub  
+
+Go to your GitHub repo:
+Settings → Secrets and variables → Actions → New repository secret
+
+Add 2 secrets:
+SONAR_TOKEN
+Name: SONAR_TOKEN
+Value: sqp_415f3e63fe4a2265504ed7c84b27a4b1a54501c6
+
+
+
 
 Ensure the App Runs
 mvn clean spring-boot:run
@@ -168,3 +184,34 @@ mvn clean verify org.sonarsource.scanner.maven:sonar-maven-plugin:sonar  -Dsonar
 
 
 mvn clean verify sonar:sonar -Dsonar.token=sqp_422525a264bfb47b49383a5c950f68c012b6729c
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
