@@ -40,7 +40,7 @@ jobs:
         JWT_SECRET:  ${{ secrets.JWT_SECRET_TEST }}
       run: |
         mvn sonar:sonar \
-          -Dsonar.projectKey=sbi-ems \
+          -Dsonar.projectKey=thevijayendra_sbi-dev-sec-ops-2026 \
           -Dsonar.organization=vaman-pundit \
           -Dsonar.login=$SONAR_TOKEN
 
