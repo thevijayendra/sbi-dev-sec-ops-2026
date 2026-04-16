@@ -41,7 +41,7 @@ jobs:
       run: |
         mvn sonar:sonar \
           -Dsonar.projectKey=thevijayendra_sbi-dev-sec-ops-2026 \
-          -Dsonar.organization=vaman-pundit \
+          -Dsonar.organization=thevijayendra \
           -Dsonar.login=$SONAR_TOKEN
 
     # ── 5. Docker Build ──────────────────────────────────────────
